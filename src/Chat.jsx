@@ -1,0 +1,144 @@
+import { useState, useEffect, useRef } from 'react';
+import { v4 as uuid } from 'uuid';
+import { supabase } from './supabase';
+import { getAIResponse } from './api';
+import './Chat.css';
+
+export default function Chat({ mode }) {
+  const [userId, setUserId] = useState(null);
+
+  useEffect(() => {
+    const fetchUser = async () => {
+      const { data: { user }, error } = await supabase.auth.getUser();
+      if (error) console.error('Auth error:', error);
+      if (user) setUserId(user.id);
+    };
+    fetchUser();
+  }, []);
+
+  const [input, setInput] = useState('');
+  const [messages, setMsgs] = useState([]);
+  const [isThinking, setThinking] = useState(false);
+  const [conversationId] = useState(() => uuid());
+  const bottomRef = useRef(null);
+
+  useEffect(() => {
+    if (!userId) return;
+    const loadMemory = async () => {
+      const { data, error } = await supabase
+        .from('memories')
+        .select('*')
+        .eq('user_id', userId)
+        .eq('mode', mode)
+        .order('created_at', { ascending: true });
+
+      if (error) console.error('Memory load error:', error);
+      if (data) setMsgs(data);
+    };
+    loadMemory();
+  }, [userId, mode]);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  const sendMsg = async () => {
+    if (!input.trim() || !userId) return;
+
+    const userMessage = {
+      id: uuid(),
+      role: 'user',
+      text: input.trim(),
+      created_at: new Date().toISOString(),
+    };
+    const updatedMessages = [...messages, userMessage];
+    setMsgs(updatedMessages);
+    setInput('');
+    setThinking(true);
+
+    await supabase.from('memories').insert([
+      { ...userMessage, user_id: userId, mode, conversation_id: conversationId }
+    ]);
+
+    try {
+      const aiText = await getAIResponse(input.trim(), mode, updatedMessages.map(m => ({
+        role: m.role === 'ai' ? 'assistant' : m.role,
+        content: m.text
+      })));
+
+      const aiMessage = {
+        id: uuid(),
+        role: 'ai',
+        text: aiText,
+        created_at: new Date().toISOString(),
+      };
+      setMsgs(prev => [...prev, aiMessage]);
+
+      await supabase.from('memories').insert([
+        { ...aiMessage, user_id: userId, mode, conversation_id: conversationId }
+      ]);
+    } catch (err) {
+      console.error(err);
+      const errorMsg = {
+        id: uuid(),
+        role: 'ai',
+        text: '⚠️ Sorry — I had trouble reaching the AI. Please try again.',
+        created_at: new Date().toISOString(),
+      };
+      setMsgs(prev => [...prev, errorMsg]);
+    } finally {
+      setThinking(false);
+    }
+  };
+
+  const clearChat = async () => {
+    if (!userId) return;
+    if (!window.confirm('Clear this conversation?')) return;
+
+    setMsgs([]);
+    await supabase
+      .from('memories')
+      .delete()
+      .eq('user_id', userId)
+      .eq('mode', mode)
+      .eq('conversation_id', conversationId);
+  };
+
+  return (
+    <div className="chat-wrapper">
+      <div className="chat-window">
+        {messages.map(m => (
+          <div key={m.id} className={`msg ${m.role}`}>
+            <div>{m.text}</div>
+            <small>{new Date(m.created_at).toLocaleTimeString()}</small>
+          </div>
+        ))}
+        {isThinking && (
+          <div className="msg ai typing">
+            <div className="typing-dots">The Connector is thinking...</div>
+          </div>
+        )}
+        <div ref={bottomRef} />
+      </div>
+
+      <div className="input-row">
+        <input
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && sendMsg()}
+          placeholder="Type your message…"
+          maxLength={1000}
+          disabled={!userId}
+        />
+        <button onClick={sendMsg} disabled={!userId}>Send</button>
+      </div>
+
+      <div className="chat-footer">
+        <small>{input.length}/1000 characters</small>
+        <button onClick={clearChat} style={{ marginLeft: 'auto' }}>
+          🗑️ Clear Chat
+        </button>
+      </div>
+    </div>
+  );
+}
