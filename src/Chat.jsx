@@ -22,29 +22,53 @@ export default function Chat({ mode }) {
     fetchUser();
   }, []);
 
-  // Start a new conversation
+  // Fetch or create conversation
   useEffect(() => {
     if (!userId) return;
-    const startConversation = async () => {
-      const newId = uuid();
-      setConversationId(newId);
-      await supabase.from('conversations').insert([{
-        id: newId,
-        user_id: userId,
-        mode,
-        started_at: new Date().toISOString(),
-        last_updated: new Date().toISOString(),
-        summary: '',
-        tags: []
-      }]);
+    const fetchOrCreateConversation = async () => {
+      const { data, error } = await supabase
+        .from('conversations')
+        .select('*')
+        .eq('user_id', userId)
+        .eq('mode', mode)
+        .order('last_updated', { ascending: false })
+        .limit(1);
+
+      if (error) {
+        console.error('Conversation fetch error:', error);
+        return;
+      }
+
+      if (data && data.length > 0) {
+        setConversationId(data[0].id);
+      } else {
+        const newId = uuid();
+        const { error: insertError } = await supabase.from('conversations').insert([{
+          id: newId,
+          user_id: userId,
+          mode,
+          started_at: new Date().toISOString(),
+          last_updated: new Date().toISOString(),
+          summary: '',
+          tags: []
+        }]);
+
+        if (insertError) {
+          console.error('Insert conversation failed:', insertError);
+          return;
+        }
+
+        setConversationId(newId);
+      }
     };
-    startConversation();
+
+    fetchOrCreateConversation();
   }, [userId, mode]);
 
-  // Load previous messages
+  // Load messages
   useEffect(() => {
     if (!userId || !conversationId) return;
-    const loadMemory = async () => {
+    const loadMessages = async () => {
       const { data, error } = await supabase
         .from('memories')
         .select('*')
@@ -56,7 +80,7 @@ export default function Chat({ mode }) {
       if (error) console.error('Memory load error:', error);
       if (data) setMsgs(data);
     };
-    loadMemory();
+    loadMessages();
   }, [userId, mode, conversationId]);
 
   useEffect(() => {
@@ -106,7 +130,6 @@ export default function Chat({ mode }) {
         conversation_id: conversationId
       }]);
 
-      // Summarize and tag
       const summaryPrompt = `Summarize the user's conversation so far in 1-2 sentences.\nThen list 3 tags that describe the key themes or concerns.`;
       const summaryResponse = await getAIResponse(summaryPrompt, mode, newMessages.map(m => ({
         role: m.role === 'ai' ? 'assistant' : m.role,
@@ -141,13 +164,32 @@ export default function Chat({ mode }) {
     if (!userId || !conversationId) return;
     if (!window.confirm('Clear this conversation?')) return;
 
-    setMsgs([]);
     await supabase
       .from('memories')
       .delete()
       .eq('user_id', userId)
       .eq('mode', mode)
       .eq('conversation_id', conversationId);
+
+    setMsgs([]);
+
+    const newId = uuid();
+    const { error } = await supabase.from('conversations').insert([{
+      id: newId,
+      user_id: userId,
+      mode,
+      started_at: new Date().toISOString(),
+      last_updated: new Date().toISOString(),
+      summary: '',
+      tags: []
+    }]);
+
+    if (error) {
+      console.error('Failed to insert new conversation:', error);
+      return;
+    }
+
+    setConversationId(newId);
   };
 
   return (
