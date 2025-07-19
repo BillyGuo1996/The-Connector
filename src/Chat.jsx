@@ -6,7 +6,13 @@ import './Chat.css';
 
 export default function Chat({ mode }) {
   const [userId, setUserId] = useState(null);
+  const [conversationId, setConversationId] = useState(null);
+  const [input, setInput] = useState('');
+  const [messages, setMsgs] = useState([]);
+  const [isThinking, setThinking] = useState(false);
+  const bottomRef = useRef(null);
 
+  // Fetch authenticated user
   useEffect(() => {
     const fetchUser = async () => {
       const { data: { user }, error } = await supabase.auth.getUser();
@@ -16,27 +22,42 @@ export default function Chat({ mode }) {
     fetchUser();
   }, []);
 
-  const [input, setInput] = useState('');
-  const [messages, setMsgs] = useState([]);
-  const [isThinking, setThinking] = useState(false);
-  const [conversationId] = useState(() => uuid());
-  const bottomRef = useRef(null);
-
+  // Start a new conversation
   useEffect(() => {
     if (!userId) return;
+    const startConversation = async () => {
+      const newId = uuid();
+      setConversationId(newId);
+      await supabase.from('conversations').insert([{
+        id: newId,
+        user_id: userId,
+        mode,
+        started_at: new Date().toISOString(),
+        last_updated: new Date().toISOString(),
+        summary: '',
+        tags: []
+      }]);
+    };
+    startConversation();
+  }, [userId, mode]);
+
+  // Load previous messages
+  useEffect(() => {
+    if (!userId || !conversationId) return;
     const loadMemory = async () => {
       const { data, error } = await supabase
         .from('memories')
         .select('*')
         .eq('user_id', userId)
         .eq('mode', mode)
+        .eq('conversation_id', conversationId)
         .order('created_at', { ascending: true });
 
       if (error) console.error('Memory load error:', error);
       if (data) setMsgs(data);
     };
     loadMemory();
-  }, [userId, mode]);
+  }, [userId, mode, conversationId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -56,9 +77,12 @@ export default function Chat({ mode }) {
     setInput('');
     setThinking(true);
 
-    await supabase.from('memories').insert([
-      { ...userMessage, user_id: userId, mode, conversation_id: conversationId }
-    ]);
+    await supabase.from('memories').insert([{
+      ...userMessage,
+      user_id: userId,
+      mode,
+      conversation_id: conversationId
+    }]);
 
     try {
       const aiText = await getAIResponse(input.trim(), mode, updatedMessages.map(m => ({
@@ -72,11 +96,33 @@ export default function Chat({ mode }) {
         text: aiText,
         created_at: new Date().toISOString(),
       };
-      setMsgs(prev => [...prev, aiMessage]);
+      const newMessages = [...updatedMessages, aiMessage];
+      setMsgs(newMessages);
 
-      await supabase.from('memories').insert([
-        { ...aiMessage, user_id: userId, mode, conversation_id: conversationId }
-      ]);
+      await supabase.from('memories').insert([{
+        ...aiMessage,
+        user_id: userId,
+        mode,
+        conversation_id: conversationId
+      }]);
+
+      // Summarize and tag
+      const summaryPrompt = `Summarize the user's conversation so far in 1-2 sentences.\nThen list 3 tags that describe the key themes or concerns.`;
+      const summaryResponse = await getAIResponse(summaryPrompt, mode, newMessages.map(m => ({
+        role: m.role === 'ai' ? 'assistant' : m.role,
+        content: m.text
+      })));
+
+      const [summaryTextRaw, tagTextRaw] = summaryResponse.split('\n');
+      const summaryText = summaryTextRaw?.replace('Summary:', '').trim();
+      const tags = tagTextRaw?.replace('Tags:', '').split(',').map(t => t.trim());
+
+      await supabase.from('conversations').update({
+        summary: summaryText,
+        tags,
+        last_updated: new Date().toISOString()
+      }).eq('id', conversationId);
+
     } catch (err) {
       console.error(err);
       const errorMsg = {
@@ -92,7 +138,7 @@ export default function Chat({ mode }) {
   };
 
   const clearChat = async () => {
-    if (!userId) return;
+    if (!userId || !conversationId) return;
     if (!window.confirm('Clear this conversation?')) return;
 
     setMsgs([]);

@@ -50,4 +50,3 @@ export async function getAIResponse(userText, mode = 'spark', history = []) {
     return "⚠️ Sorry, something went wrong on my side. Try again in a moment.";
   }
 }
-
